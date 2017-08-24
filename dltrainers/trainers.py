@@ -28,20 +28,21 @@ class BasicTrainer(object):
     as convenient.
     """
 
-    def __init__(self, model, use_cuda=True, input_shape=None, output_shape=None):
+    def __init__(self, model, use_cuda=True,
+                 fields = ("input", "output"),
+                 data_order = (None, None),
+                 model_order = (None, None)):
         self.use_cuda = use_cuda
         self.model = self._cuda(model)
         if "META" not in dir(self.model):
             self.model.META = dict(ntrain=0)
         self.meta = self.model.META
         self.init_loss()
-        self.data_input = None
-        self.model_input = None
-        self.model_output = None
-        self.data_output = None
+        self.input_name, self.output_name = fields
+        self.data_input, self.data_output = data_order
+        self.model_input, self.model_output = model_order
         self.no_display = False
-        self.input_name = "inputs"
-        self.output_name = "outputs"
+        self.current_lr = None
         self.set_lr(1e-3)
 
     def log(self, key, **kw):
