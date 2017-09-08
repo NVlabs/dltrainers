@@ -7,19 +7,27 @@ and provide methods for training and evaluation."""
 import numpy as np
 import torch
 from torch import autograd, nn, optim
-from torch.autograd import Variable
+from torch.autograd import Variable, Function
 import torch.nn.functional as F
 from scipy import ndimage
 import helpers as dlh
 import dlmodels as dlm
 
+
+class Weighted(Function):
+    def forward(self, x, weights):
+        self.saved_for_backward = [weights]
+        return x
+    def backward(self, grad_output):
+        weights, = self.saved_for_backward
+        grad_input = weights * grad_output
+        return grad_input
+
+
 class BasicTrainer(object):
     """Trainers take care of bookkeeping for training models.
 
-    The basic method is `train_batch(inputs, targets)`.  This converts
-    to/from numpy and torch tensors, CPU/GPU tensors, and optionally
-    dlh.reorders the axes of the input and output tensors to account for
-    different model and data conventions. It also catches errors
+    The basic method is `train_batch(inputs, targets)`. It catches errors
     during forward propagation and reports the model and input shapes
     (shape mismatches are the most common source of errors.
 
@@ -30,8 +38,8 @@ class BasicTrainer(object):
 
     def __init__(self, model, use_cuda=True,
                  fields = ("input", "output"),
-                 data_order = (None, None),
-                 model_order = (None, None)):
+                 input_axes = None,
+                 output_axes = None):
         self.use_cuda = use_cuda
         self.model = self._cuda(model)
         if "META" not in dir(self.model):
@@ -39,11 +47,10 @@ class BasicTrainer(object):
         self.meta = self.model.META
         self.init_loss()
         self.input_name, self.output_name = fields
-        self.data_input, self.data_output = data_order
-        self.model_input, self.model_output = model_order
         self.no_display = False
         self.current_lr = None
         self.set_lr(1e-3)
+        self.weighted = Weighted()
 
     def log(self, key, **kw):
         record = dict(ntrain=self.meta["ntrain"])
@@ -62,20 +69,6 @@ class BasicTrainer(object):
 
     def log_has(self, key):
         return key in self.meta and len(self.meta[key]) > 0
-
-    def set_input_orders(self, data_input, model_input):
-        assert isinstance(data_input, str)
-        assert isinstance(model_input, str)
-        assert len(data_input) == len(model_input)
-        self.data_input = data_input
-        self.model_input = model_input
-
-    def set_output_orders(self, data_output, model_output):
-        assert isinstance(model_output, str)
-        assert isinstance(data_output, str)
-        assert len(data_output) == len(model_output)
-        self.data_output = data_output
-        self.model_output = model_output
 
     def _cuda(self, x):
         """Convert object to CUDA if use_cuda==True."""
@@ -108,36 +101,33 @@ class BasicTrainer(object):
                                    momentum=momentum,
                                    weight_decay=weight_decay)
 
-    def get_outputs(self, outputs):
+    def get_outputs(self):
         """Performs any necessary transformations on the output tensor.
-
-        May perform transformations like BDHW to BHWD.
         """
-        return dlh.reorder(dlh.novar(self.cuoutput), self.model_output, self.data_output).cpu()
+        return dlh.novar(self.cuoutput).cpu()
 
     def set_inputs(self, batch):
         """Sets the cuinput variable from the input data.
-
-        May perform transformations like BHWD to BDHW.
         """
-        dlh.assign(self.cuinput, batch, self.data_input, self.model_input)
+        assert isinstance(batch, torch.Tensor)
+        dlh.assign(self.cuinput, batch)
 
-    def set_targets(self, targets, outputs, weights=None):
+    def set_targets(self, targets, weights=None):
         """Sets the cutarget variable from the given tensor.
-
-        May perform transformations like BHWD to BDHW.
-        Also optionally allows weights to be set for some kinds of trainers.
         """
-        self.target_shape = dlh.shp(targets)
-        assert weights is None, "weights not implemented"
-        assert dlh.shp(targets) == dlh.shp(outputs)
-        dlh.assign(self.cutarget, targets, self.data_output, self.model_output)
+        dlh.assign(self.cutarget, targets, False)
+        assert self.cuoutput.size() == self.cutargets.size()
+        if weights is not None:
+            dlh.assign(self.cuweights, weights, False)
+            assert self.cuoutput.size() == self.cuweights.size()
+        else:
+            self.cuweights = None
 
     def init_loss(self, loss=nn.MSELoss()):
         self.criterion = self._cuda(loss)
 
     def compute_loss(self, targets, weights=None):
-        self.set_targets(targets, self.cuoutput, weights=weights)
+        self.set_targets(targets, weights=weights)
         return self.criterion(self.cuoutput, self.cutarget)
 
     def forward(self):
@@ -145,10 +135,8 @@ class BasicTrainer(object):
             self.cuoutput = self.model(self.cuinput)
         except RuntimeError, err:
             print "runtime error in forward step:"
-            print "batch shape", self.data_input
-            print "model input", self.model_input, dlh.shp(self.cuinput)
-            print "model:"
-            print self.model
+            print self.cuinput.size()
+            print self.cutarget.size()
             raise err
 
     def train_batch(self, inputs, targets, weights=None, update=True):
@@ -159,6 +147,10 @@ class BasicTrainer(object):
             self.set_training(False)
         self.set_inputs(inputs)
         self.forward()
+        if weights is not None:
+            self.cuweights = autograd.Variable(torch.randn(1, 1).cuda())
+            dlh.assign(self.cuweights, weights, False)
+            self.cuoutput = self.weighted(self.cuoutput, self.cuweights)
         culoss = self.compute_loss(targets, weights=weights)
         if update:
             culoss.backward()
@@ -167,7 +159,7 @@ class BasicTrainer(object):
         if update:
             self.meta["ntrain"] += len(inputs)
             self.log("training", loss=ploss)
-        return self.get_outputs(self.cuoutput), ploss
+        return self.get_outputs(), ploss
 
     def eval_batch(self, inputs, targets):
         return self.train_batch(inputs, targets, update=False)
@@ -176,7 +168,7 @@ class BasicTrainer(object):
         self.set_training(False)
         self.set_inputs(inputs)
         self.forward()
-        return self.get_outputs(self.cuoutput)
+        return self.get_outputs()
 
     def display_loss(self, every=100, smooth=1e-2, yscale=None):
         if self.no_display: return
@@ -238,17 +230,14 @@ class BasicTrainer(object):
 class ImageClassifierTrainer(BasicTrainer):
     def __init__(self, *args, **kw):
         BasicTrainer.__init__(self, *args, **kw)
-        self.set_input_orders("BHWD", "BDHW")
-        self.set_output_orders("BC", "BC")
 
     def set_inputs(self, images, depth1=False):
-        dlh.assign(self.cuinput, images, self.data_input, self.model_input)
+        dlh.assign(self.cuinput, images, transpose_on_convert=(0, 3, 1, 2))
 
-    def set_targets(self, targets, outputs, weights=None):
+    def set_targets(self, targets, weights=None):
         assert weights is None, "weights not implemented"
         assert dlh.rank(outputs) == 2, dlh.shp(outputs)
-        if isinstance(targets, list): targets = dlh.as_nda(targets)
-        targets = dlh.as_torch(targets)
+        assert isinstance(targets, torch.Tensor)
         if dlh.rank(targets) == 1:
             targets = targets.unsqueeze(1)
             b, c = dlh.shp(outputs)
@@ -256,49 +245,43 @@ class ImageClassifierTrainer(BasicTrainer):
             onehot.scatter_(1, targets, 1)
             targets = onehot
         assert dlh.shp(targets) == dlh.shp(outputs)
-        dlh.assign(self.cutarget, targets, self.data_output, self.model_output)
+        dlh.assign(self.cutarget, targets, transpose_on_convert=(0, 3, 1, 2))
+
 
 def zoom_like(batch, target_shape, order=0):
-    target_shape = tuple(target_shape)
-    if dlh.shp(batch) == target_shape:
-        return batch
-    assert order >= 0
+    assert isinstance(batch, np.ndarray)
     scales = [r * 1.0 / b for r, b in zip(target_shape, batch.shape)]
     result = np.zeros(target_shape)
-    ndimage.zoom(dlh.as_nda(batch), scales, order=order, output=result)
-    return dlh.typeas(result, batch)
+    ndimage.zoom(batch, scales, order=order, output=result)
+    return result
 
 
 class Image2ImageTrainer(BasicTrainer):
-    """Train image to image models.
-
-    This takes images in BHWD order and performs all the necessary
-    transformations internally. It also zooms targets up/down to
-    the output size of the model. The Torch model still needs to
-    take/return BDHW tensors.
-    """
+    """Train image to image models."""
     def __init__(self, *args, **kw):
         BasicTrainer.__init__(self, *args, **kw)
-        self.set_input_orders("BHWD", "BDHW")
-        self.set_output_orders("BHWD", "BDHW")
 
     def compute_loss(self, targets, weights=None):
-        self.set_targets(targets, self.cuoutput, weights=weights)
+        self.set_targets(targets, weights=weights)
         return self.criterion(dlm.layers.pixels_to_batch(self.cuoutput),
                               dlm.layers.pixels_to_batch(self.cutarget))
 
     def set_inputs(self, images):
-        dlh.assign(self.cuinput, images, self.data_input, self.model_input)
+        dlh.assign(self.cuinput, images, (0, 3, 1, 2))
 
-    def set_targets(self, targets, outputs, weights=None):
-        assert weights is None
-        assert dlh.rank(outputs) == 4, dlh.shp(outputs)
-        assert dlh.rank(targets) == 4, dlh.shp(targets)
-        targets = dlh.reorder(targets, self.data_output, self.model_output)
-        assert dlh.size(outputs, 0) == dlh.size(targets, 0), "must have same batch size as output"
-        assert dlh.size(outputs, 1) == dlh.size(targets, 1), "must have same depth as output"
-        targets = zoom_like(targets, dlh.shp(outputs))
-        dlh.assign(self.cutarget, targets)
+    def get_outputs(self):
+        return dlh.as_nda(self.cuoutput, (0, 2, 3, 1))
+
+    def set_targets(self, targets, weights=None):
+        b, d, h, w = tuple(self.cuoutput.size())
+        targets = dlh.as_nda(targets, (0, 2, 3, 1))
+        targets = zoom_like(targets, (b, h, w, d))
+        dlh.assign(self.cutarget, targets, (0, 3, 1, 2))
+        assert self.cutarget.size() == self.cuoutput.size()
+        if weights is not None:
+            weights = dlh.as_nda(weights, (0, 2, 3, 1))
+            weights = zoom_like(weights, (b, h, w, d))
+            dlh.assign(self.cuweights, weights, (0, 3, 1, 2))
 
 def ctc_align(prob, target):
     """Perform CTC alignment on torch sequence batches (using ocrolstm).
@@ -356,8 +339,7 @@ class Image2SeqTrainer(BasicTrainer):
         return self.criterion(probs, Variable(self._cuda(aligned)))
 
     def set_inputs(self, images):
-        batch = dlh.bhwd2bdhw(images)
-        dlh.assign(self.cuinput, batch, self.data_input, self.model_input)
+        dlh.assign(self.cuinput, batch, (0, 3, 1, 2))
 
     def set_targets(self, targets, outputs, weights=None):
         raise Exception("overridden by compute_loss")

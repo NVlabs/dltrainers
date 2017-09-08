@@ -11,11 +11,16 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 from scipy import ndimage
 
-def novar(x):
-    """Turns a variable into a tensor; does nothing for a tensor."""
+torch_tensor_types = tuple([
+    torch.Tensor,
+    torch.FloatTensor, torch.IntTensor, torch.LongTensor,
+    torch.cuda.FloatTensor, torch.cuda.IntTensor, torch.cuda.LongTensor
+])
+
+def is_tensor(x):
     if isinstance(x, Variable):
-        return x.data
-    return x
+        x = x.data
+    return isinstance(x, torch_tensor_types)
 
 def rank(x):
     """Return the rank of the ndarray or tensor."""
@@ -31,17 +36,6 @@ def size(x, i):
     else:
         return x.size(i)
 
-torch_tensor_types = tuple([
-    torch.Tensor,
-    torch.FloatTensor, torch.IntTensor, torch.LongTensor,
-    torch.cuda.FloatTensor, torch.cuda.IntTensor, torch.cuda.LongTensor
-])
-
-def is_tensor(x):
-    if isinstance(x, Variable):
-        x = x.data
-    return isinstance(x, torch_tensor_types)
-
 def shp(x):
     """Returns the shape of a tensor or ndarray as a tuple."""
     if isinstance(x, Variable):
@@ -53,7 +47,17 @@ def shp(x):
     else:
         raise ValueError("{}: unknown type".format(type(x)))
 
-def as_nda(x):
+def novar(x):
+    """Turns a variable into a tensor; does nothing for a tensor."""
+    if isinstance(x, Variable):
+        return x.data
+    return x
+
+def maybe_transpose(x, axes):
+    if axes is None: return x
+    return x.transpose(axes)
+
+def as_nda(x, transpose_on_convert=None):
     """Turns any tensor into an ndarray."""
     if isinstance(x, np.ndarray):
         return x
@@ -62,10 +66,11 @@ def as_nda(x):
     if isinstance(x, autograd.Variable):
         x = x.data
     if isinstance(x, torch_tensor_types):
-        return x.cpu().numpy()
+        x = x.cpu().numpy()
+        return np.ascontiguousarray(maybe_transpose(x, transpose_on_convert))
     raise ValueError("{}: can't convert to np.array".format(type(x)))
 
-def as_torch(x, single=True):
+def as_torch(x, transpose_on_convert=None, single=True):
     """Converts any kind of tensor/array into a torch tensor."""
     if isinstance(x, Variable):
         return x.data
@@ -74,6 +79,7 @@ def as_torch(x, single=True):
     if isinstance(x, list):
         x = np.array(x)
     if isinstance(x, np.ndarray):
+        x = maybe_transpose(x, transpose_on_convert)
         if x.dtype == np.dtype("f"):
             return torch.FloatTensor(x)
         elif x.dtype == np.dtype("d"):
@@ -87,7 +93,7 @@ def as_torch(x, single=True):
             raise ValueError("{} {}: unknown dtype".format(x, x.dtype))
     raise ValueError("{} {}: unknown type".format(x, type(x)))
 
-def typeas(x, y):
+def typeas(x, y, transpose_on_convert):
     """Make x the same type as y, for numpy, torch, torch.cuda."""
     assert not isinstance(x, Variable)
     if isinstance(y, Variable):
@@ -142,11 +148,12 @@ def reorder(batch, inp, out):
     elif isinstance(batch, np.ndarray):
         return batch.transpose(*result)
 
-def assign(dest, src, inp=None, out=None):
+def assign(dest, src, transpose_on_convert=None):
     """Resizes the destination and copies the source."""
-    src = reorder(as_torch(src), inp, out)
+    src = as_torch(src, transpose_on_convert)
     if isinstance(dest, Variable):
         dest.data.resize_(*shp(src)).copy_(src)
-    else:
+    elif isinstance(dest, torch.Tensor):
         dest.resize_(*shp(src)).copy_(src)
-
+    else:
+        raise ValueError("{}: unknown type".format(type(dest)))
