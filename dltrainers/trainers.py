@@ -135,8 +135,7 @@ class BasicTrainer(object):
             self.cuoutput = self.model(self.cuinput)
         except RuntimeError, err:
             print "runtime error in forward step:"
-            print self.cuinput.size()
-            print self.cutarget.size()
+            print "input", self.cuinput.size()
             raise err
 
     def train_batch(self, inputs, targets, weights=None, update=True):
