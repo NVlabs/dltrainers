@@ -17,6 +17,13 @@ from torch import nn
 from torch import autograd
 from torch.autograd import Variable
 from torch.legacy import nn as legnn
+import numpy as np
+import torch
+from torch import nn
+from torch import autograd
+from torch.autograd import Variable
+from torch.legacy import nn as legnn
+import layers
 
 BD = "BD"
 LBD = "LBD"
@@ -139,9 +146,23 @@ class Viewer(nn.Module):
     def __repr__(self):
         return "Viewer %s" % (self.shape,)
 
+class Flat(nn.Module):
+    def __init__(self):
+        nn.Module.__init__(self)
+
+    def forward(self, x):
+        rank = len(x.size())
+        assert rank > 2
+        new_depth = np.prod(tuple(x.size())[1:])
+        return x.view(-1, new_depth)
+
+    def __repr__(self):
+        return "Flat"
+
+
 class Textline2Img(nn.Module):
-    iorder = BWH
-    oorder = BDWH
+    input_order = BWH
+    output_order = BDWH
 
     def __init__(self):
         nn.Module.__init__(self)
@@ -152,8 +173,8 @@ class Textline2Img(nn.Module):
 
 
 class Img2Seq(nn.Module):
-    iorder = BDWH
-    oorder = BDL
+    input_order = BDWH
+    output_order = BDL
 
     def __init__(self):
         nn.Module.__init__(self)
@@ -165,8 +186,8 @@ class Img2Seq(nn.Module):
 
 
 class ImgMaxSeq(nn.Module):
-    iorder = BDWH
-    oorder = BDL
+    input_order = BDWH
+    output_order = BDL
 
     def __init__(self):
         nn.Module.__init__(self)
@@ -177,8 +198,8 @@ class ImgMaxSeq(nn.Module):
 
 
 class ImgSumSeq(nn.Module):
-    iorder = BDWH
-    oorder = BDL
+    input_order = BDWH
+    output_order = BDL
 
     def __init__(self):
         nn.Module.__init__(self)
@@ -194,8 +215,8 @@ class Lstm1(nn.Module):
     All the sequence processing layers use BDL order by default to
     be consistent with 1D convolutions.
     """
-    iorder = BDL
-    oorder = BDL
+    input_order = BDL
+    output_order = BDL
 
     def __init__(self, ninput=None, noutput=None, ndir=2):
         nn.Module.__init__(self)
@@ -220,8 +241,8 @@ class Lstm1(nn.Module):
 
 class Lstm2to1(nn.Module):
     """An LSTM that summarizes one dimension."""
-    iorder = BDWH
-    oorder = BDL
+    input_order = BDWH
+    output_order = BDL
 
     def __init__(self, ninput=None, noutput=None):
         nn.Module.__init__(self)
@@ -255,8 +276,8 @@ class Lstm2to1(nn.Module):
 
 class Lstm1to0(nn.Module):
     """An LSTM that summarizes one dimension."""
-    iorder = BDL
-    oorder = BD
+    input_order = BDL
+    output_order = BD
 
     def __init__(self, ninput=None, noutput=None):
         nn.Module.__init__(self)
@@ -321,3 +342,85 @@ class Lstm2(nn.Module):
         vert = self.vlstm(horizT)
         vertT = vert.permute(0, 1, 3, 2).contiguous()
         return vertT
+
+class Flex(nn.Module):
+    def __init__(self, creator):
+        super(Flex, self).__init__()
+        self.creator = creator
+        self.layer = None
+    def forward(self, *args):
+        if self.layer is None:
+            self.layer = self.creator(*args)
+        return self.layer.forward(*args)
+    def __repr__(self):
+        return "Flex:"+repr(self.layer)
+    def __str__(self):
+        return "Flex:"+str(self.layer)
+
+
+def Linear(*args, **kw):
+    def creator(x):
+        assert x.ndimension()==2
+        d = x.size(1)
+        return nn.Linear(x.size(1), *args, **kw)
+    return Flex(creator)
+
+
+def Conv1d(*args, **kw):
+    def creator(x):
+        assert x.ndimension()==3
+        d = x.size(1)
+        return nn.Conv1d(x.size(1), *args, **kw)
+    return Flex(creator)
+        
+
+def Conv2d(*args, **kw):
+    def creator(x):
+        assert x.ndimension()==4
+        d = x.size(1)
+        return nn.Conv2d(x.size(1), *args, **kw)
+    return Flex(creator)
+        
+
+def Conv3d(*args, **kw):
+    def creator(x):
+        assert x.ndimension()==5
+        d = x.size(1)
+        return nn.Conv3d(x.size(1), *args, **kw)
+    return Flex(creator)
+
+
+def Lstm1(*args, **kw):
+    def creator(x):
+        assert x.ndimension()==3
+        d = x.size(1)
+        return layers.Lstm1(x.size(1), *args, **kw)
+    return Flex(creator)
+
+
+def Lstm1to0(*args, **kw):
+    def creator(x):
+        assert x.ndimension()==3
+        d = x.size(1)
+        return layers.Lstm1to0(x.size(1), *args, **kw)
+    return Flex(creator)
+
+
+def Lstm2(*args, **kw):
+    def creator(x):
+        assert x.ndimension()==4
+        d = x.size(1)
+        return layers.Lstm2(x.size(1), *args, **kw)
+    return Flex(creator)
+
+
+def Lstm2to1(*args, **kw):
+    def creator(x):
+        assert x.ndimension()==4
+        d = x.size(1)
+        return layers.Lstm2to1(x.size(1), *args, **kw)
+    return Flex(creator)
+
+def flex_freeze(model):
+    # FIXME
+    return model

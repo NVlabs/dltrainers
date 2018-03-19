@@ -21,6 +21,10 @@ class Flex(nn.Module):
         if self.layer is None:
             self.layer = self.creator(*args)
         return self.layer.forward(*args)
+    def __repr__(self):
+        return "Flex:"+repr(self.layer)
+    def __str__(self):
+        return "Flex:"+str(self.layer)
 
 
 def Linear(*args, **kw):

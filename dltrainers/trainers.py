@@ -23,6 +23,12 @@ def get_log(log, logname, **kw):
     records = [x for x in log if x.get("__log__")==logname]
     return records
 
+def update_display():
+    from matplotlib import pyplot
+    from IPython import display
+    display.clear_output(wait=True)
+    display.display(pyplot.gcf())
+
 class Weighted(Function):
     def forward(self, x, weights):
         self.saved_for_backward = [weights]
@@ -167,21 +173,22 @@ class BasicTrainer(object):
         else:
             return zip(*records)
 
-    def display_loss(self, every=100, smooth=1e-2, yscale=None):
+    def plot_loss(self, every=100, smooth=1e-2, yscale=None):
         if self.no_display: return
         # we import these locally to avoid dependence on display
         # functions for training
         import matplotlib as mpl
         from matplotlib import pyplot
-        from IPython import display
         from scipy.ndimage import filters
-        pyplot.clf()
         x, y = self.loss_curve("train")
         pyplot.plot(x, y)
         x, y = self.loss_curve("test")
         pyplot.plot(x, y)
-        display.clear_output(wait=True)
-        display.display(pyplot.gcf())
+
+    def display_loss(self, *args, **kw):
+        pyplot.clf()
+        self.plot_loss(*args, **kw)
+        update_display()
 
     def set_sample_fields(self, input_name, output_name):
         self.input_name = input_name
