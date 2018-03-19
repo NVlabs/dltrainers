@@ -4,6 +4,8 @@
 """A set of "trainers", classes that wrap around Torch models
 and provide methods for training and evaluation."""
 
+import time
+import platform
 import numpy as np
 import torch
 from torch import autograd, nn, optim
@@ -13,6 +15,13 @@ from scipy import ndimage
 import helpers as dlh
 import dlmodels as dlm
 
+def add_log(log, logname, **kw):
+    entry = dict(kw, __log__=logname, __at__=time.time(), __node__=platform.node())
+    log.append(entry)
+
+def get_log(log, logname, **kw):
+    records = [x for x in log if x.get("__log__")==logname]
+    return records
 
 class Weighted(Function):
     def forward(self, x, weights):
@@ -42,33 +51,14 @@ class BasicTrainer(object):
                  output_axes = None):
         self.use_cuda = use_cuda
         self.model = self._cuda(model)
-        if "META" not in dir(self.model):
-            self.model.META = dict(ntrain=0)
-        self.meta = self.model.META
         self.init_loss()
         self.input_name, self.output_name = fields
         self.no_display = False
         self.current_lr = None
         self.set_lr(1e-3)
         self.weighted = Weighted()
-
-    def log(self, key, **kw):
-        record = dict(ntrain=self.meta["ntrain"])
-        record.update(kw)
-        if key not in self.meta:
-            self.meta[key] = []
-        self.meta[key].append(record)
-
-    def log_retrieve(self, key, *args):
-        result = []
-        for record in self.meta[key]:
-            if len([a for a in args if a not in record]) > 0:
-                continue
-            result.append(tuple((record[a] for a in args)))
-        return zip(*result)
-
-    def log_has(self, key):
-        return key in self.meta and len(self.meta[key]) > 0
+        self.ntrain = 0
+        self.log = []
 
     def _cuda(self, x):
         """Convert object to CUDA if use_cuda==True."""
@@ -95,7 +85,7 @@ class BasicTrainer(object):
 
     def set_lr(self, lr, momentum=0.9, weight_decay=0.0):
         """Set the optimizer to SGD with the given parameters."""
-        self.log("rates", lr=lr)
+        self.current_lr = lr
         self.optimizer = optim.SGD(self.model.parameters(),
                                    lr=lr,
                                    momentum=momentum,
@@ -138,7 +128,7 @@ class BasicTrainer(object):
             print "input", self.cuinput.size()
             raise err
 
-    def train_batch(self, inputs, targets, weights=None, update=True):
+    def train_batch(self, inputs, targets, weights=None, update=True, logname="train"):
         if update:
             self.set_training(True)
             self.optimizer.zero_grad()
@@ -155,19 +145,27 @@ class BasicTrainer(object):
             culoss.backward()
             self.optimizer.step()
         ploss = dlh.novar(culoss)[0]
-        if update:
-            self.meta["ntrain"] += len(inputs)
-            self.log("training", loss=ploss)
+        self.ntrain += dlh.size(inputs, 0)
+        add_log(self.log, logname, loss=ploss, ntrain=self.ntrain, lr=self.current_lr)
         return self.get_outputs(), ploss
 
     def eval_batch(self, inputs, targets):
-        return self.train_batch(inputs, targets, update=False)
+        return self.train_batch(inputs, targets, update=False, logname="eval")
 
     def predict_batch(self, inputs):
         self.set_training(False)
         self.set_inputs(inputs)
         self.forward()
         return self.get_outputs()
+
+    def loss_curve(self, logname):
+        records = get_log(self.log, logname)
+        records = [(x["ntrain"], x["loss"]) for x in records]
+        records = sorted(records)
+        if len(records)==0:
+            return [], []
+        else:
+            return zip(*records)
 
     def display_loss(self, every=100, smooth=1e-2, yscale=None):
         if self.no_display: return
@@ -177,17 +175,11 @@ class BasicTrainer(object):
         from matplotlib import pyplot
         from IPython import display
         from scipy.ndimage import filters
-        if len(self.meta["losses"]) % every != 0:
-            return
         pyplot.clf()
-        if self.log_has("training"):
-            pyplot.subplot(121)
-            counts, losses = self.log_retrieve("training", "ntrain", "loss")
-            pyplot.plot(counts, losses)
-        if self.log_has("test"):
-            pyplot.subplot(122)
-            counts, losses = self.log_retrieve("test", "ntrain", "loss")
-            pyplot.plot(counts, losses)
+        x, y = self.loss_curve("train")
+        pyplot.plot(x, y)
+        x, y = self.loss_curve("test")
+        pyplot.plot(x, y)
         display.clear_output(wait=True)
         display.display(pyplot.gcf())
 
@@ -223,7 +215,6 @@ class BasicTrainer(object):
             count += len(input_tensor)
             losses.append(loss)
         loss = np.mean(losses)
-        self.log("test", loss=loss)
         return loss, count
 
 class ImageClassifierTrainer(BasicTrainer):
@@ -235,16 +226,16 @@ class ImageClassifierTrainer(BasicTrainer):
 
     def set_targets(self, targets, weights=None):
         assert weights is None, "weights not implemented"
-        assert dlh.rank(outputs) == 2, dlh.shp(outputs)
-        assert isinstance(targets, torch.Tensor)
         if dlh.rank(targets) == 1:
+            targets = dlh.as_torch(targets)
             targets = targets.unsqueeze(1)
-            b, c = dlh.shp(outputs)
+            b, c = dlh.shp(self.cuoutput)
             onehot = torch.zeros(b, c)
             onehot.scatter_(1, targets, 1)
-            targets = onehot
-        assert dlh.shp(targets) == dlh.shp(outputs)
-        dlh.assign(self.cutarget, targets, transpose_on_convert=(0, 3, 1, 2))
+            dlh.assign(self.cutarget, onehot)
+        else:
+            assert dlh.shp(targets) == dlh.shp(self.cuoutput)
+            dlh.assign(self.cutarget, targets)
 
 
 def zoom_like(batch, target_shape, order=0):
@@ -338,7 +329,7 @@ class Image2SeqTrainer(BasicTrainer):
         return self.criterion(probs, Variable(self._cuda(aligned)))
 
     def set_inputs(self, images):
-        dlh.assign(self.cuinput, batch, (0, 3, 1, 2))
+        dlh.assign(self.cuinput, images, (0, 3, 1, 2))
 
     def set_targets(self, targets, outputs, weights=None):
         raise Exception("overridden by compute_loss")

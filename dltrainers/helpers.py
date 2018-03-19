@@ -93,7 +93,7 @@ def as_torch(x, transpose_on_convert=None, single=True):
             raise ValueError("{} {}: unknown dtype".format(x, x.dtype))
     raise ValueError("{} {}: unknown type".format(x, type(x)))
 
-def typeas(x, y, transpose_on_convert):
+def typeas(x, y):
     """Make x the same type as y, for numpy, torch, torch.cuda."""
     assert not isinstance(x, Variable)
     if isinstance(y, Variable):
