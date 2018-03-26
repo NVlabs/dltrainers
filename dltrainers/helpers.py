@@ -17,6 +17,68 @@ torch_tensor_types = tuple([
     torch.cuda.FloatTensor, torch.cuda.IntTensor, torch.cuda.LongTensor
 ])
 
+def asnd(x):
+    """Convert torch/numpy to numpy."""
+    if isinstance(x, np.ndarray):
+        return x
+    if isinstance(x, Variable):
+        x = x.data
+    if isinstance(x, (torch.cuda.FloatTensor, torch.cuda.DoubleTensor, torch.cuda.IntTensor)):
+        x = x.cpu()
+    return x.numpy()
+
+def as_nda(x, transpose_on_convert=None):
+    """Turns any tensor into an ndarray."""
+    if isinstance(x, np.ndarray):
+        return x
+    if isinstance(x, list):
+        return np.array(x)
+    if isinstance(x, autograd.Variable):
+        x = x.data
+    if isinstance(x, torch_tensor_types):
+        x = x.cpu().numpy()
+        return np.ascontiguousarray(maybe_transpose(x, transpose_on_convert))
+    raise ValueError("{}: can't convert to np.array".format(type(x)))
+
+def astorch(x, single=True):
+    """Convert torch/numpy to torch."""
+    if isinstance(x, np.ndarray):
+        if x.dtype == np.dtype("f"):
+            return torch.FloatTensor(x)
+        elif x.dtype == np.dtype("d"):
+            if single:
+                return torch.FloatTensor(x)
+            else:
+                return torch.DoubleTensor(x)
+        elif x.dtype == np.dtype("i"):
+            return torch.IntTensor(x)
+        else:
+            error("unknown np.dtype")
+    return x
+
+def as_torch(x, transpose_on_convert=None, single=True):
+    """Converts any kind of tensor/array into a torch tensor."""
+    if isinstance(x, Variable):
+        return x.data
+    if isinstance(x, torch_tensor_types):
+        return x
+    if isinstance(x, list):
+        x = np.array(x)
+    if isinstance(x, np.ndarray):
+        x = maybe_transpose(x, transpose_on_convert)
+        if x.dtype == np.dtype("f"):
+            return torch.FloatTensor(x)
+        elif x.dtype == np.dtype("d"):
+            if single:
+                return torch.FloatTensor(x)
+            else:
+                return torch.DoubleTensor(x)
+        elif x.dtype in [np.dtype("i"), np.dtype("int64")]:
+            return torch.LongTensor(x)
+        else:
+            raise ValueError("{} {}: unknown dtype".format(x, x.dtype))
+    raise ValueError("{} {}: unknown type".format(x, type(x)))
+
 def is_tensor(x):
     if isinstance(x, Variable):
         x = x.data
@@ -57,59 +119,26 @@ def maybe_transpose(x, axes):
     if axes is None: return x
     return x.transpose(axes)
 
-def as_nda(x, transpose_on_convert=None):
-    """Turns any tensor into an ndarray."""
-    if isinstance(x, np.ndarray):
-        return x
-    if isinstance(x, list):
-        return np.array(x)
-    if isinstance(x, autograd.Variable):
-        x = x.data
-    if isinstance(x, torch_tensor_types):
-        x = x.cpu().numpy()
-        return np.ascontiguousarray(maybe_transpose(x, transpose_on_convert))
-    raise ValueError("{}: can't convert to np.array".format(type(x)))
-
-def as_torch(x, transpose_on_convert=None, single=True):
-    """Converts any kind of tensor/array into a torch tensor."""
-    if isinstance(x, Variable):
-        return x.data
-    if isinstance(x, torch_tensor_types):
-        return x
-    if isinstance(x, list):
-        x = np.array(x)
-    if isinstance(x, np.ndarray):
-        x = maybe_transpose(x, transpose_on_convert)
-        if x.dtype == np.dtype("f"):
-            return torch.FloatTensor(x)
-        elif x.dtype == np.dtype("d"):
-            if single:
-                return torch.FloatTensor(x)
-            else:
-                return torch.DoubleTensor(x)
-        elif x.dtype in [np.dtype("i"), np.dtype("int64")]:
-            return torch.LongTensor(x)
-        else:
-            raise ValueError("{} {}: unknown dtype".format(x, x.dtype))
-    raise ValueError("{} {}: unknown type".format(x, type(x)))
-
 def typeas(x, y):
     """Make x the same type as y, for numpy, torch, torch.cuda."""
     assert not isinstance(x, Variable)
     if isinstance(y, Variable):
         y = y.data
     if isinstance(y, np.ndarray):
-        return as_nda(x)
+        return asnd(x)
     if isinstance(x, np.ndarray):
-        return as_torch(x)
+        if isinstance(y, (torch.FloatTensor, torch.cuda.FloatTensor)):
+            x = torch.FloatTensor(x)
+        else:
+            x = torch.DoubleTensor(x)
     return x.type_as(y)
 
-def sequence_is_normalized(x, eps=1e-3):
+def sequence_is_normalized(x, d, eps=1e-3):
     """Check whether a batch of sequences BDL is normalized in d."""
     if isinstance(x, Variable):
         x = x.data
     assert x.dim() == 3
-    marginal = x.sum(1)
+    marginal = x.sum(d)
     return (marginal - 1.0).abs().lt(eps).all()
 
 def bhwd2bdhw(images, depth1=False):
@@ -157,3 +186,48 @@ def assign(dest, src, transpose_on_convert=None):
         dest.resize_(*shp(src)).copy_(src)
     else:
         raise ValueError("{}: unknown type".format(type(dest)))
+
+def one_sequence_softmax(x):
+    """Compute softmax over a sequence; shape is (l, d)"""
+    y = asnd(x)
+    assert y.ndim==2, "%s: input should be (length, depth)" % y.shape
+    l, d = y.shape
+    y = np.amax(y, axis=1)[:, np.newaxis] -y
+    y = np.clip(y, -80, 80)
+    y = np.exp(y)
+    y = y / np.sum(y, axis=1)[:, np.newaxis]
+    return typeas(y, x)
+
+def sequence_softmax(x):
+    """Compute sotmax over a batch of sequences; shape is (b, l, d)."""
+    y = asnd(x)
+    assert y.ndim==3, "%s: input should be (batch, length, depth)" % y.shape
+    for i in range(len(y)):
+        y[i] = one_sequence_softmax(y[i])
+    return typeas(y, x)
+
+def ctc_align(prob, target):
+    """Perform CTC alignment on torch sequence batches (using ocrolstm)"""
+    import cctc
+    prob_ = prob.cpu()
+    target = target.cpu()
+    b, l, d = prob.size()
+    bt, lt, dt = target.size()
+    assert bt==b, (bt, b)
+    assert dt==d, (dt, d)
+    assert sequence_is_normalized(prob, 2), prob
+    assert sequence_is_normalized(target, 2), target
+    result = torch.rand(1)
+    cctc.ctc_align_targets_batch(result, prob_, target)
+    return typeas(result, prob)
+
+def ctc_loss(logits, target):
+    """A CTC loss function for BLD sequence training."""
+    assert logits.is_contiguous()
+    assert target.is_contiguous()
+    probs = sequence_softmax(logits)
+    aligned = ctc_align(probs, target)
+    assert aligned.size()==probs.size(), (aligned.size(), probs.size())
+    deltas = aligned - probs
+    logits.backward(deltas.contiguous())
+    return deltas, aligned

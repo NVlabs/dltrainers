@@ -1,16 +1,6 @@
 # Copyright (c) 2017 NVIDIA CORPORATION. All rights reserved.
 # See the LICENSE file for licensing terms (BSD-style).
 
-__all__ = """
-Gpu
-Img2Seq ImgMaxSeq ImgSumSeq
-Lstm1 Lstm1to0
-Lstm2 Lstm2to1
-Permute Reorder Viewer
-RowwiseLSTM
-Textline2Img
-""".split()
-
 import numpy as np
 import torch
 from torch import nn
@@ -23,7 +13,7 @@ from torch import nn
 from torch import autograd
 from torch.autograd import Variable
 from torch.legacy import nn as legnn
-import layers
+import helpers
 
 BD = "BD"
 LBD = "LBD"
@@ -34,6 +24,10 @@ BWHD = "BWHD"
 BDWH = "BDWH"
 BWH = "BWH"
 
+def deprecated(f):
+    def g(*args, **kw):
+        raise Exception("deprecated")
+    return g
 
 def lbd2bdl(x):
     assert len(x.size()) == 3
@@ -44,13 +38,13 @@ def bdl2lbd(x):
     assert len(x.size()) == 3
     return x.permute(2, 0, 1).contiguous()
 
-
 def data(x):
     if isinstance(x, Variable):
         return x.data
     else:
         return x
 
+@deprecated
 def typeas(x, y):
     """Make x the same type as y, for numpy, torch, torch.cuda."""
     assert not isinstance(x, Variable)
@@ -65,13 +59,17 @@ def typeas(x, y):
             x = torch.DoubleTensor(x)
     return x.type_as(y)
 
-def pixels_to_batch(x):
-    b, d, h, w = x.size()
-    return x.permute(0, 2, 3, 1).contiguous().view(b*h*w, d)
+class Fun(nn.Module):
+    def __init__(self, f):
+        nn.Module.__init__(self)
+        self.f = f
+    def forward(self, x):
+        return self.f(x)
 
 class PixelsToBatch(nn.Module):
     def forward(self, x):
-        return pixels_to_batch(x)
+        b, d, h, w = x.size()
+        return x.permute(0, 2, 3, 1).contiguous().view(b*h*w, d)
 
 class WeightedGrad(autograd.Function):
     def forward(self, input, weights):
@@ -88,10 +86,29 @@ class Info(nn.Module):
         nn.Module.__init__(self)
         self.info = info
     def forward(self, x):
-        print "Info", self.info, x.size(), x.min(), x.max()
+        print "Info", self.info, x.size(), x.min().data[0], x.max().data[0]
         return x
 
-class Gpu(nn.Module):
+class CheckSizes(nn.Module):
+    def __init__(self, *args, **kw):
+        nn.Module.__init__(self)
+        self.order = kw.get("order")
+        self.name = kw.get("name")
+        self.limits = [(x, x) if isinstance(x, int) else x for x in args]
+    def forward(self, x):
+        for (i, actual), (lo, hi) in zip(enumerate(tuple(x.size())), self.limits):
+            if actual < lo:
+                raise Exception("{} ({}): index {} too low ({} not >= {})"
+                                .format(self.name, self.order,
+                                        i, actual, lo))
+            if actual > hi:
+                raise Exception("{} ({}): index {} too high ({} not <= {})"
+                                .format(self.name, self.order,
+                                        i, actual, hi))
+        return x
+
+
+class Cuda(nn.Module):
     def __init__(self):
         nn.Module.__init__(self)
         self.use_cuda = None
@@ -104,6 +121,12 @@ class Gpu(nn.Module):
             return x.cpu()
         else:
             return x.cuda(self.use_cuda)
+
+class Cpu(nn.Module):
+    def __init__(self):
+        nn.Module.__init__(self)
+    def forward(self, x):
+        return x.cpu()
 
 class Check(nn.Module):
     def __init__(self, *shape, **kw):
@@ -126,14 +149,14 @@ class Reorder(nn.Module):
         nn.Module.__init__(self)
         self.permutation = tuple([old.find(c) for c in new])
     def forward(self, x):
-        return x.permute(*self.permutation)
+        return x.permute(*self.permutation).contiguous()
 
 class Permute(nn.Module):
     def __init__(self, *args):
         nn.Module.__init__(self)
         self.permutation = args
     def forward(self, x):
-        return x.permute(*self.permutation)
+        return x.permute(*self.permutation).contiguous()
 
 class Viewer(nn.Module):
     def __init__(self, *args):
@@ -209,7 +232,7 @@ class ImgSumSeq(nn.Module):
         return img.sum(3)[0].squeeze(3).permute(0, 2, 1).contiguous()
 
 
-class Lstm1(nn.Module):
+class LSTM1(nn.Module):
     """A simple bidirectional LSTM.
 
     All the sequence processing layers use BDL order by default to
@@ -231,15 +254,15 @@ class Lstm1(nn.Module):
         seq = bdl2lbd(seq)
         l, bs, d = seq.size()
         assert d == self.ninput, seq.size()
-        h0 = Variable(typeas(torch.zeros(self.ndir, bs, self.noutput), seq),
+        h0 = Variable(helpers.typeas(torch.zeros(self.ndir, bs, self.noutput), seq),
                       volatile=volatile)
-        c0 = Variable(typeas(torch.zeros(self.ndir, bs, self.noutput), seq),
+        c0 = Variable(helpers.typeas(torch.zeros(self.ndir, bs, self.noutput), seq),
                       volatile=volatile)
         post_lstm, _ = self.lstm(seq, (h0, c0))
         return lbd2bdl(post_lstm)
 
 
-class Lstm2to1(nn.Module):
+class LSTM2to1(nn.Module):
     """An LSTM that summarizes one dimension."""
     input_order = BDWH
     output_order = BDL
@@ -256,9 +279,9 @@ class Lstm2to1(nn.Module):
         seq = img.permute(3, 0, 2, 1).contiguous().view(h, b * w, d)
         bs = b * w
         h0 = Variable(
-            typeas(torch.zeros(1, bs, self.noutput), img), volatile=volatile)
+            helpers.typeas(torch.zeros(1, bs, self.noutput), img), volatile=volatile)
         c0 = Variable(
-            typeas(torch.zeros(1, bs, self.noutput), img), volatile=volatile)
+            helpers.typeas(torch.zeros(1, bs, self.noutput), img), volatile=volatile)
         # HBsD -> HBsD
         assert seq.size() == (h, b * w, d), (seq.size(), (h, b * w, d))
         post_lstm, _ = self.lstm(seq, (h0, c0))
@@ -274,7 +297,7 @@ class Lstm2to1(nn.Module):
         return final
 
 
-class Lstm1to0(nn.Module):
+class LSTM1to0(nn.Module):
     """An LSTM that summarizes one dimension."""
     input_order = BDL
     output_order = BD
@@ -291,9 +314,9 @@ class Lstm1to0(nn.Module):
         l, b, d = seq.size()
         assert d == self.ninput, (d, self.ninput)
         h0 = Variable(
-            typeas(torch.zeros(1, b, self.noutput), seq), volatile=volatile)
+            helpers.typeas(torch.zeros(1, b, self.noutput), seq), volatile=volatile)
         c0 = Variable(
-            typeas(torch.zeros(1, b, self.noutput), seq), volatile=volatile)
+            helpers.typeas(torch.zeros(1, b, self.noutput), seq), volatile=volatile)
         assert seq.size() == (l, b, d)
         post_lstm, _ = self.lstm(seq, (h0, c0))
         assert post_lstm.size() == (l, b, self.noutput)
@@ -315,8 +338,8 @@ class RowwiseLSTM(nn.Module):
         # BDHW -> WHBD -> WB'D
         seq = img.permute(3, 2, 0, 1).contiguous().view(w, h * b, d)
         # WB'D
-        h0 = typeas(torch.zeros(self.ndir, h * b, self.noutput), img)
-        c0 = typeas(torch.zeros(self.ndir, h * b, self.noutput), img)
+        h0 = helpers.typeas(torch.zeros(self.ndir, h * b, self.noutput), img)
+        c0 = helpers.typeas(torch.zeros(self.ndir, h * b, self.noutput), img)
         h0 = Variable(h0, volatile=volatile)
         c0 = Variable(c0, volatile=volatile)
         seqresult, _ = self.lstm(seq, (h0, c0))
@@ -326,7 +349,7 @@ class RowwiseLSTM(nn.Module):
         return result
 
 
-class Lstm2(nn.Module):
+class LSTM2(nn.Module):
     """A 2D LSTM module."""
 
     def __init__(self, ninput=None, noutput=None, nhidden=None, ndir=2):
@@ -343,84 +366,3 @@ class Lstm2(nn.Module):
         vertT = vert.permute(0, 1, 3, 2).contiguous()
         return vertT
 
-class Flex(nn.Module):
-    def __init__(self, creator):
-        super(Flex, self).__init__()
-        self.creator = creator
-        self.layer = None
-    def forward(self, *args):
-        if self.layer is None:
-            self.layer = self.creator(*args)
-        return self.layer.forward(*args)
-    def __repr__(self):
-        return "Flex:"+repr(self.layer)
-    def __str__(self):
-        return "Flex:"+str(self.layer)
-
-
-def Linear(*args, **kw):
-    def creator(x):
-        assert x.ndimension()==2
-        d = x.size(1)
-        return nn.Linear(x.size(1), *args, **kw)
-    return Flex(creator)
-
-
-def Conv1d(*args, **kw):
-    def creator(x):
-        assert x.ndimension()==3
-        d = x.size(1)
-        return nn.Conv1d(x.size(1), *args, **kw)
-    return Flex(creator)
-        
-
-def Conv2d(*args, **kw):
-    def creator(x):
-        assert x.ndimension()==4
-        d = x.size(1)
-        return nn.Conv2d(x.size(1), *args, **kw)
-    return Flex(creator)
-        
-
-def Conv3d(*args, **kw):
-    def creator(x):
-        assert x.ndimension()==5
-        d = x.size(1)
-        return nn.Conv3d(x.size(1), *args, **kw)
-    return Flex(creator)
-
-
-def Lstm1(*args, **kw):
-    def creator(x):
-        assert x.ndimension()==3
-        d = x.size(1)
-        return layers.Lstm1(x.size(1), *args, **kw)
-    return Flex(creator)
-
-
-def Lstm1to0(*args, **kw):
-    def creator(x):
-        assert x.ndimension()==3
-        d = x.size(1)
-        return layers.Lstm1to0(x.size(1), *args, **kw)
-    return Flex(creator)
-
-
-def Lstm2(*args, **kw):
-    def creator(x):
-        assert x.ndimension()==4
-        d = x.size(1)
-        return layers.Lstm2(x.size(1), *args, **kw)
-    return Flex(creator)
-
-
-def Lstm2to1(*args, **kw):
-    def creator(x):
-        assert x.ndimension()==4
-        d = x.size(1)
-        return layers.Lstm2to1(x.size(1), *args, **kw)
-    return Flex(creator)
-
-def flex_freeze(model):
-    # FIXME
-    return model
