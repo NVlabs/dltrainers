@@ -86,22 +86,22 @@ def Lstm2to1(*args, **kw):
         return layers.LSTM2to1(x.size(1), *args, **kw)
     return Flex(creator)
 
-def MaxPool1d(*args, **kw):
+def BatchNorm1d(*args, **kw):
     def creator(x):
         assert x.ndimension()==3
-        return nn.MaxPool1d(x.size(1), *args, **kw)
+        return nn.BatchNorm1d(x.size(1), *args, **kw)
     return Flex(creator)
 
-def MaxPool2d(*args, **kw):
+def BatchNorm2d(*args, **kw):
     def creator(x):
         assert x.ndimension()==4
-        return nn.MaxPoo21d(x.size(1), *args, **kw)
+        return nn.BatchNorm2d(x.size(1), *args, **kw)
     return Flex(creator)
 
-def MaxPool3d(*args, **kw):
+def BatchNorm3d(*args, **kw):
     def creator(x):
         assert x.ndimension()==5
-        return nn.MaxPoo21d(x.size(1), *args, **kw)
+        return nn.BatchNorm3d(x.size(1), *args, **kw)
     return Flex(creator)
 
 def replace_modules(model, f):

@@ -60,11 +60,14 @@ def typeas(x, y):
     return x.type_as(y)
 
 class Fun(nn.Module):
-    def __init__(self, f):
+    def __init__(self, f, info=None):
         nn.Module.__init__(self)
         self.f = f
+        self.info = info
     def forward(self, x):
         return self.f(x)
+    def __repr__(self):
+        return "Fun {}".format(self.info or self.f)
 
 class PixelsToBatch(nn.Module):
     def forward(self, x):
@@ -88,6 +91,8 @@ class Info(nn.Module):
     def forward(self, x):
         print "Info", self.info, x.size(), x.min().data[0], x.max().data[0]
         return x
+    def __repr__(self):
+        return "Info {}".format(self.info)
 
 class CheckSizes(nn.Module):
     def __init__(self, *args, **kw):
@@ -107,26 +112,34 @@ class CheckSizes(nn.Module):
                                         i, actual, hi))
         return x
 
+    def __repr__(self):
+        return "CheckSizes {}".format(self.limits)
+
 
 class Cuda(nn.Module):
     def __init__(self):
         nn.Module.__init__(self)
-        self.use_cuda = None
+        self.use_cuda = False
     def cpu(self):
-        self.use_cuda = None
-    def cuda(self, unit=0):
+        self.use_cuda = False
+    def cuda(self, unit=None):
+        print "*** Cuda", unit
         self.use_cuda = unit
     def forward(self, x):
-        if self.use_cuda is None:
+        if self.use_cuda is False:
             return x.cpu()
         else:
             return x.cuda(self.use_cuda)
+    def __repr__(self):
+        return "Cuda:{}".format("Any" if self.use_cuda is None else self.use_cuda)
 
 class Cpu(nn.Module):
     def __init__(self):
         nn.Module.__init__(self)
     def forward(self, x):
         return x.cpu()
+    def __repr__(self):
+        return "Cpu"
 
 class Check(nn.Module):
     def __init__(self, *shape, **kw):
@@ -146,17 +159,23 @@ class Check(nn.Module):
 
 class Reorder(nn.Module):
     def __init__(self, old, new):
+        self.old = old
+        self.new = new
         nn.Module.__init__(self)
         self.permutation = tuple([old.find(c) for c in new])
     def forward(self, x):
         return x.permute(*self.permutation).contiguous()
-
+    def __repr__(self):
+        return "Reorder {}->{}".format(self.old, self.new)
+    
 class Permute(nn.Module):
     def __init__(self, *args):
         nn.Module.__init__(self)
         self.permutation = args
     def forward(self, x):
         return x.permute(*self.permutation).contiguous()
+    def __repr__(self):
+        return "Permute({})".format(self.permutation)
 
 class Viewer(nn.Module):
     def __init__(self, *args):
@@ -194,6 +213,9 @@ class Textline2Img(nn.Module):
         b, l, d = seq.size()
         return seq.view(b, 1, l, d)
 
+    def __repr__(self):
+        return "Textline2Img"
+
 
 class Img2Seq(nn.Module):
     input_order = BDWH
@@ -207,6 +229,8 @@ class Img2Seq(nn.Module):
         perm = img.permute(0, 1, 3, 2).contiguous()
         return perm.view(b, d * h, w)
 
+    def __repr__(self):
+        return "Img2Seq"
 
 class ImgMaxSeq(nn.Module):
     input_order = BDWH
@@ -219,6 +243,9 @@ class ImgMaxSeq(nn.Module):
         # BDWH -> BDW -> BWD
         return img.max(3)[0].squeeze(3)
 
+    def __repr__(self):
+        return "ImgMaxSeq"
+
 
 class ImgSumSeq(nn.Module):
     input_order = BDWH
@@ -230,6 +257,9 @@ class ImgSumSeq(nn.Module):
     def forward(self, img):
         # BDWH -> BDW -> BWD
         return img.sum(3)[0].squeeze(3).permute(0, 2, 1).contiguous()
+
+    def __repr__(self):
+        return "ImgSumSeq"
 
 
 class LSTM1(nn.Module):
@@ -260,6 +290,11 @@ class LSTM1(nn.Module):
                       volatile=volatile)
         post_lstm, _ = self.lstm(seq, (h0, c0))
         return lbd2bdl(post_lstm)
+
+    def __repr__(self):
+        return "LSTM1:"+self.lstm.__repr__()
+
+
 
 
 class LSTM2to1(nn.Module):
