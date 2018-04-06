@@ -62,12 +62,16 @@ def typeas(x, y):
 class Fun(nn.Module):
     def __init__(self, f, info=None):
         nn.Module.__init__(self)
-        self.f = f
+        assert isinstance(f, str)
+        self.f = eval(f)
+        self.f_str = f
         self.info = info
+    def __getnewargs__(self):
+        return (self.f_str, self.info)
     def forward(self, x):
         return self.f(x)
     def __repr__(self):
-        return "Fun {}".format(self.info or self.f)
+        return "Fun {} {}".format(self.info, self.f)
 
 class PixelsToBatch(nn.Module):
     def forward(self, x):
@@ -167,7 +171,7 @@ class Reorder(nn.Module):
         return x.permute(*self.permutation).contiguous()
     def __repr__(self):
         return "Reorder {}->{}".format(self.old, self.new)
-    
+
 class Permute(nn.Module):
     def __init__(self, *args):
         nn.Module.__init__(self)
@@ -176,6 +180,26 @@ class Permute(nn.Module):
         return x.permute(*self.permutation).contiguous()
     def __repr__(self):
         return "Permute({})".format(self.permutation)
+
+class Reshape(nn.Module):
+    def __init__(self, *args):
+        nn.Module.__init__(self)
+        self.shape = args
+    def forward(self, x):
+        newshape = []
+        for s in self.shape:
+            if isinstance(s, int):
+                newshape.append(int(x.size(s)))
+            elif isinstance(s, (tuple, list)):
+                total = 1
+                for j in s:
+                    total *= int(x.size(j))
+                newshape.append(total)
+            else:
+                raise ValueError("shape spec must be either int or tuple, got {}".format(s))
+        return x.view(*newshape)
+    def __repr__(self):
+        return "Reshape({})".format(self.shape)
 
 class Viewer(nn.Module):
     def __init__(self, *args):
