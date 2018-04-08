@@ -231,3 +231,19 @@ def ctc_loss(logits, target):
     deltas = aligned - probs
     logits.backward(deltas.contiguous())
     return deltas, aligned
+
+class LearningRateSchedule(object):
+    def __init__(self, schedule):
+        if ":" in schedule:
+            self.learning_rates = [[float(y) for y in x.split(",")] for x in schedule.split(":")]
+            assert self.learning_rates[0][0] == 0
+        else:
+            lr0 = float(schedule)
+            self.learning_rates = [[0, lr0]]
+    def __call__(self, count):
+        _, lr = self.learning_rates[0]
+        for n, l in self.learning_rates:
+            if count < n: break
+            lr = l
+        return lr
+
