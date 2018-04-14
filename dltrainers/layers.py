@@ -225,6 +225,33 @@ class Flat(nn.Module):
     def __repr__(self):
         return "Flat"
 
+class Img2FlatSum(nn.Module):
+    input_order = BDWH
+    output_order = BD
+
+    def __init__(self):
+        nn.Module.__init__(self)
+
+    def forward(self, img):
+        # BDWH -> BD
+        return img.sum(3).sum(2)
+
+    def __repr__(self):
+        return "Img2FlatSum"
+
+class Img2FlatMax(nn.Module):
+    input_order = BDWH
+    output_order = BD
+
+    def __init__(self):
+        nn.Module.__init__(self)
+
+    def forward(self, img):
+        # BDWH -> BD
+        return img.max(3)[0].max(2)[0]
+
+    def __repr__(self):
+        return "Img2FlatMax"
 
 class Textline2Img(nn.Module):
     input_order = BWH
@@ -269,7 +296,6 @@ class ImgMaxSeq(nn.Module):
 
     def __repr__(self):
         return "ImgMaxSeq"
-
 
 class ImgSumSeq(nn.Module):
     input_order = BDWH
