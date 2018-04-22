@@ -1,4 +1,6 @@
-*~
-*.pyc
 build
-.*
+*.pyc
+*~
+*.tgz
+*.pt
+.ipynb_checkpoints
