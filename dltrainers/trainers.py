@@ -13,7 +13,6 @@ from torch.autograd import Variable, Function
 import torch.nn.functional as F
 from scipy import ndimage
 import helpers as dlh
-import dlmodels as dlm
 
 def add_log(log, logname, **kw):
     entry = dict(kw, __log__=logname, __at__=time.time(), __node__=platform.node())
@@ -252,6 +251,9 @@ def zoom_like(batch, target_shape, order=0):
     ndimage.zoom(batch, scales, order=order, output=result)
     return result
 
+def pixels_to_batch(x):
+    b, d, h, w = x.size()
+    return x.permute(0, 2, 3, 1).contiguous().view(b*h*w, d)
 
 class Image2ImageTrainer(BasicTrainer):
     """Train image to image models."""
@@ -260,8 +262,8 @@ class Image2ImageTrainer(BasicTrainer):
 
     def compute_loss(self, targets, weights=None):
         self.set_targets(targets, weights=weights)
-        return self.criterion(dlm.layers.pixels_to_batch(self.cuoutput),
-                              dlm.layers.pixels_to_batch(self.cutarget))
+        return self.criterion(pixels_to_batch(self.cuoutput),
+                              pixels_to_batch(self.cutarget))
 
     def set_inputs(self, images):
         dlh.assign(self.cuinput, images, (0, 3, 1, 2))
